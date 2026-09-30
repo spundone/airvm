@@ -1,0 +1,57 @@
+#!/bin/bash
+# airvm: helper for the local Tart VM that mirrors the MacBook Air.
+set -uo pipefail
+VM=air-vm
+TART="$HOME/.local/bin/tart"
+TOOLS="$HOME/.local/share/air-vm/tools"
+LOG="$HOME/.local/log/tart-run.log"
+SHARES=(--dir=air-backup:"$HOME/air-backup":ro --dir=vm-tools:"$TOOLS":ro)
+
+running() { "$TART" list 2>/dev/null | grep -E "^local[[:space:]]+$VM[[:space:]]" | grep -q running; }
+need_running() { running || { echo "$VM is not running. Try: airvm up" >&2; exit 1; }; }
+
+case "${1:-help}" in
+  up)
+    if running; then echo "$VM already running: $("$TART" ip $VM 2>/dev/null)"; exit 0; fi
+    # headless: no window needed, use ssh / exec / vnc
+    nohup setsid "$TART" run $VM --no-graphics "${SHARES[@]}" > "$LOG" 2>&1 &
+    echo -n "booting"; for _ in $(seq 1 60); do ip=$("$TART" ip $VM --wait 2 2>/dev/null) && [ -n "$ip" ] && break; echo -n .; done
+    echo; echo "$VM up at ${ip:-unknown}";;
+  down)     "$TART" stop $VM;;
+  status)   "$TART" list | grep -E "Source|$VM"; running && echo "ip: $("$TART" ip $VM)";;
+  ip)       "$TART" ip $VM;;
+  ssh)      shift; need_running; exec ssh $VM "$@";;
+  exec)     shift; need_running
+            if "$TART" exec $VM true >/dev/null 2>&1; then exec "$TART" exec $VM "$@"; else echo "guest agent not up, using ssh" >&2; exec ssh $VM "$@"; fi;;
+  push)     shift; need_running; scp -r "$1" "$VM:${2:-/Users/admin/}";;
+  pull)     shift; need_running; scp -r "$VM:$1" "${2:-.}";;
+  restore)  need_running; ssh $VM 'bash "/Volumes/My Shared Files/vm-tools/air-vm-restore.sh"';;
+  setup-agent) need_running; ssh $VM 'bash "/Volumes/My Shared Files/vm-tools/vm-setup-agent.sh"';;
+  gui|vnc)  need_running
+            # enable the guest's built-in Screen Sharing (idempotent), then open it with the host's Screen Sharing app
+            "$0" exec bash -c 'sudo launchctl enable system/com.apple.screensharing >/dev/null 2>&1; sudo launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist >/dev/null 2>&1; true'
+            ip=$("$TART" ip $VM) || exit 1
+            echo "opening vnc://admin@$ip  (password is the VM admin password)"
+            open "vnc://admin@$ip";;
+  open)     shift; need_running; [ $# -gt 0 ] || { echo "usage: airvm open <App Name | path | url>" >&2; exit 1; }
+            # run a GUI app or URL in the VM's logged-in desktop session; view it with: airvm gui
+            if [ -e "$1" ] || [[ "$1" == *://* ]]; then "$0" exec open "$@"; else "$0" exec open -a "$@"; fi;;
+  shot)     need_running; out="${2:-$HOME/air-vm-shot.png}"
+            "$0" exec screencapture -x /tmp/airvm-shot.png && scp -q $VM:/tmp/airvm-shot.png "$out" && echo "$out";;
+  snap)     name="${2:?usage: airvm snap <name>}"; running && { echo "stop the VM first: airvm down" >&2; exit 1; }
+            "$TART" clone $VM "$VM-$name" && echo "snapshot: $VM-$name (restore by: tart delete $VM && tart clone $VM-$name $VM)";;
+  snaps)    "$TART" list | grep -E "Source|local";;
+  help|*)   cat <<H
+airvm up | down | status | ip
+airvm ssh [cmd]        ssh in (key auth)
+airvm exec <cmd>       run via tart exec (falls back to ssh)
+airvm push <src> [dst] / pull <remote> [dst]
+airvm restore          run the Air restore script in the VM
+airvm setup-agent      install tart-guest-agent (enables tart exec)
+airvm gui              open the VM desktop in Screen Sharing (alias: vnc)
+airvm open <app|path|url>  launch a GUI app/URL in the VM desktop (e.g. airvm open Safari)
+airvm shot [file]      screenshot the VM desktop to a file
+airvm snap <name>      clone the stopped VM as a snapshot;  airvm snaps  to list
+H
+  ;;
+esac

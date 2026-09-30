@@ -1,0 +1,5 @@
+.DS_Store
+*.log
+tart-guest-agent
+*.pem
+id_*
