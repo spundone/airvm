@@ -13,10 +13,17 @@ need_running() { running || { echo "$VM is not running. Try: airvm up" >&2; exit
 case "${1:-help}" in
   up)
     if running; then echo "$VM already running: $("$TART" ip $VM 2>/dev/null)"; exit 0; fi
-    # headless: no window needed, use ssh / exec / vnc
-    nohup setsid "$TART" run $VM --no-graphics "${SHARES[@]}" > "$LOG" 2>&1 &
-    echo -n "booting"; for _ in $(seq 1 60); do ip=$("$TART" ip $VM --wait 2 2>/dev/null) && [ -n "$ip" ] && break; echo -n .; done
-    echo; echo "$VM up at ${ip:-unknown}";;
+    # headless: no window needed, use ssh / exec / gui. (macOS has no setsid; nohup + disown is enough.)
+    nohup "$TART" run $VM --no-graphics "${SHARES[@]}" > "$LOG" 2>&1 &
+    pid=$!; disown "$pid" 2>/dev/null || true
+    echo -n "booting"; ip=""
+    for _ in $(seq 1 60); do
+      kill -0 "$pid" 2>/dev/null || { echo; echo "tart exited early; log ($LOG):" >&2; tail -5 "$LOG" >&2; exit 1; }
+      ip=$("$TART" ip $VM --wait 2 2>/dev/null) && [ -n "$ip" ] && break; ip=""; echo -n .
+    done
+    echo
+    [ -n "$ip" ] || { echo "$VM did not report an IP within 2 minutes; check $LOG" >&2; exit 1; }
+    echo "$VM up at $ip";;
   down)     "$TART" stop $VM;;
   status)   "$TART" list | grep -E "Source|$VM"; running && echo "ip: $("$TART" ip $VM)";;
   ip)       "$TART" ip $VM;;
